@@ -51,8 +51,8 @@
 ## 2.虚拟机ip规划
 
 ```shell
-10.0.0.100  k8s-master
-10.0.0.100  k8s-node1
+10.0.0.130  k8s-master
+10.0.0.131  k8s-node1
 ```
 
 
@@ -60,45 +60,33 @@
 ## 3.修改静态ip
 
 ```shell
-vim /etc/sysconfig/network-scripts/ifcfg-ens33
+cd /etc/netplan/
+sudo cp 00-installer-config.yaml 00-installer-config.yaml.bak
+sudo vim 00-installer-config.yaml
 ```
 
 在最下面添加如下内容
 
-```shell
-#修改
-ONBOOT=yes
-#添加
-BOOTPROTO="static"
-IPADDR=10.0.0.100  # 您的静态 IP 地址
-NETMASK=255.255.255.0  # 子网掩码
-GATEWAY=10.0.0.2   # 默认网关（请根据您的网络设置进行更改）
-DNS1=8.8.8.8           # DNS 服务器地址（您可以指定一个或多个）
-DNS2=8.8.4.4
+```yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens33:  # 将此更改为你的网络接口名称  
+      dhcp4: no
+      addresses:
+        - 10.0.0.130/24  # 设置你的静态 IP 地址和子网掩码  
+      routes:
+        - to: default
+          via: 10.0.0.2  # 网关地址
+      nameservers:
+          addresses: [8.8.8.8,8.8.4.4]  # 设置你的 DNS 服务器地址
 ```
 
 重启网络服务
 
-```shell
-systemctl restart network.service	
 ```
-
-四台机器同样的方式修改为静态ip。
-
-
-
-## 4.关闭selinux
-
-所有机器
-
-```shell
-vim /etc/selinux/config
-```
-
-```shell
-SELINUX=enforcing
-#修改为
-SELINUX=disabled
+sudo netplan apply
 ```
 
 
@@ -106,46 +94,26 @@ SELINUX=disabled
 ## 5.firewalld
 
 ```shell
-systemctl disable firewalld.service
-systemctl stop firewalld.service
-systemctl status firewalld.service
+sudo systemctl disable ufw.service
+sudo systemctl stop ufw.service
+sudo systemctl status ufw.service
 ```
 
 
 
 ## 6.禁用swap
 
-所有机器
-
-```shell
-[root@localhost ~]# free -m
-              total        used        free      shared  buff/cache   available
-Mem:           4056         346        3486          11         223        3481
-Swap:          4095           0        4095
-```
-
 修改配置文件
 
 ```shell
-vim /etc/fstab
+sudo vim /etc/fstab
 ```
 
 找到这一行并注释掉
 
 ```shell
-#/dev/mapper/centos-swap swap                    swap    defaults        0 0
+#/swap.img      none    swap    sw      0       0
 ```
-
-reboot 重启系统后再次查看
-
-```shell
-[root@localhost ~]# free -m
-              total        used        free      shared  buff/cache   available
-Mem:           4056         318        3537          11         200        3512
-Swap:             0           0           0
-```
-
-
 
 
 
@@ -155,10 +123,6 @@ Swap:             0           0           0
 hostnamectl set-hostname  k8s-master
 exec /bin/bash
 ```
-
-其他的也依次修改
-
-
 
 
 
@@ -171,69 +135,57 @@ vim /etc/hosts
 ```
 
 ```shell
-127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
-::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
 #添加域名
-10.0.0.100  k8s-master
-10.0.0.101  k8s-node-1
-10.0.0.102  k8s-node-2
-10.0.0.103  k8s-harbor
+10.0.0.130  k8s-master
+10.0.0.131  k8s-node-1
 ```
 
 
 
 ## 9.添加网桥过滤和地址转发功能
 
-vim /etc/sysctl.conf
-
-```shell
-net.bridge.bridge-nf-call-ip6tables = 1
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
+```
+sudo vim /etc/modules-load.d/k8s.conf
 ```
 
 ```shell
-#重新加载配置：
-sysctl -p
-#加载网桥过滤器模块
-modprobe br_netfilter
-#查看网桥过滤器模块是否加载成功
+overlay
+br_netfilter
+```
+
+加载网桥过滤器模块
+
+```
+sudo modprobe overlay
+sudo modprobe br_netfilter
+```
+
+```shell
 lsmod | grep br_netfilter
 ```
 
-
+会有下面的输出
 
 ```shell
-#br_netfilter           22256  0 
-#bridge                151336  1 br_netfilter
+br_netfilter           22256  0 
+bridge                151336  1 br_netfilter
 ```
 
-
-
-开机自动加载
+设置所需的 sysctl 参数，参数在重新启动后保持不变
 
 ```shell
- vim /etc/systemd/system/br_netfilter.service
-```
-
-```shell
-[Unit]
-Description=Load br_netfilter Module
-Before=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/sbin/modprobe br_netfilter
-RemainAfter=network.target
-
-[Install]
-WantedBy=multi-user.target
+ sudo vim /etc/sysctl.d/k8s.conf
 ```
 
 ```shell
-sudo systemctl daemon-reload
-sudo systemctl enable br_netfilter.service
-sudo systemctl start br_netfilter.service
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward 
+```
+
+```shell
+# 应用 sysctl 参数而不重新启动
+sudo sysctl --system
 ```
 
 
@@ -249,7 +201,7 @@ wget https://github.com/containerd/containerd/releases/download/v1.7.14/containe
 ```shell
 mkdir containerd
 tar -zxf containerd-1.7.14-linux-amd64.tar.gz -C containerd
-cp -p containerd/bin/* /usr/local/bin/
+sudo cp -p containerd/bin/* /usr/local/bin/
 ```
 
 ```shell
@@ -261,7 +213,7 @@ containerd --version
 开机启动
 
 ```shell
-vim /lib/systemd/system/containerd.service
+sudo vim /lib/systemd/system/containerd.service
 ```
 
 ```shell
@@ -285,13 +237,11 @@ LimitCORE=infinity
 WantedBy=multi-user.target
 ```
 
-
-
 ```shell
-systemctl daemon-reload
-systemctl enable containerd
-systemctl start containerd
-systemctl status containerd
+sudo systemctl daemon-reload
+sudo systemctl enable containerd
+sudo systemctl start containerd
+sudo systemctl status containerd
 ```
 
 
@@ -299,15 +249,18 @@ systemctl status containerd
 生成containerd 的配置文件
 
 ```shell
-mkdir -p /etc/containerd
-containerd config default > /etc/containerd/config.toml
-cp -p /etc/containerd/config.toml /etc/containerd/config.toml.bak
+sudo mkdir -p /etc/containerd
+#切换root
+su
+#这行需要root账户
+sudo containerd config default > /etc/containerd/config.toml
+sudo cp -p /etc/containerd/config.toml /etc/containerd/config.toml.bak
 ```
 
 
 
 ```shell
-vim /etc/containerd/config.toml
+sudo vim /etc/containerd/config.toml
 ```
 
 
@@ -329,14 +282,14 @@ sandbox_image = "registry.aliyuncs.com/google_containers/pause:3.9"
 
 
 ```shell
-systemctl restart containerd
-systemctl status containerd
+sudo systemctl restart containerd
+sudo systemctl status containerd
 ```
 
 
 
 ```shell
-[root@k8s-master ~]# ctr version
+yantao@k8s-master:~$ sudo ctr version
 Client:
   Version:  v1.7.14
   Revision: dcf2847247e18caba8dce86522029642f60fe96b
@@ -345,8 +298,7 @@ Client:
 Server:
   Version:  v1.7.14
   Revision: dcf2847247e18caba8dce86522029642f60fe96b
-  UUID: 58e0a398-7b8a-450c-a0d4-819b9b524986
-
+  UUID: d7ccbb0f-c77f-4264-a14e-d41ddf939cc
 ```
 
 
@@ -364,23 +316,24 @@ wget https://github.com/opencontainers/runc/releases/download/v1.1.12/libseccomp
 安装编译工具
 
 ```shell
-yum install gcc gperf -y
+sudo apt update
+sudo apt install gperf gcc make -y
 ```
 
 ```shell
 tar -zxvf libseccomp-2.5.4.tar.gz
 cd libseccomp-2.5.4/
 ./configure
-make && make install
+sudo make && sudo make install
 ```
 
 
 
 ```shell
-cd /root
+cd
 wget https://github.com/opencontainers/runc/releases/download/v1.1.12/runc.amd64
-chmod +x runc.amd64
-mv runc.amd64 /usr/local/sbin/runc
+sudo chmod +x runc.amd64
+sudo mv runc.amd64 /usr/local/sbin/runc
 
 ```
 
@@ -396,18 +349,18 @@ runc --version
 
 安装
 
+```
+su
+```
+
 ```shell
-cat <<EOF | tee /etc/yum.repos.d/kubernetes.repo
-[kubernetes]
-name=Kubernetes
-baseurl=https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/rpm/
-enabled=1
-gpgcheck=1
-gpgkey=https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/rpm/repodata/repomd.xml.key
-EOF
-setenforce 0
-yum install -y kubelet kubeadm kubectl
-systemctl enable kubelet && systemctl start kubelet && systemctl status kubelet
+apt-get update && apt-get install -y apt-transport-https
+curl -fsSL https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/deb/Release.key |
+    gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/deb/ /" |
+    tee /etc/apt/sources.list.d/kubernetes.list
+apt-get update
+apt-get install -y kubelet kubeadm kubectl
 
 ```
 
@@ -442,49 +395,13 @@ registry.k8s.io/coredns/coredns:v1.10.1
 
 
 
-vim image.sh 这步跳过
-
-```shell
-#!/bin/bash
-
-images=(
-kube-apiserver:v1.28.10
-kube-controller-manager:v1.28.10
-kube-scheduler:v1.28.10
-kube-proxy:v1.28.10
-pause:3.9
-etcd:3.5.12-0
-coredns:v1.10.1
-)
-for imageName in "${images[@]}"; do
-ctr -n k8s.io i pull registry.aliyuncs.com/google_containers/$imageName
-ctr -n k8s.io i tag registry.aliyuncs.com/google_containers/"$imageName" k8s.gcr.io/"$imageName"
-ctr -n k8s.io i rm registry.aliyuncs.com/google_containers/$imageName
-done
-```
-
-
-
-```shell
-chmod +x ./image.sh 
-./image.sh 
-```
-
-```shell
-ctr -n k8s.io i tag k8s.gcr.io/coredns:v1.10.1 registry.k8s.io/coredns/coredns:v1.10.1
-```
-
-```shell
-ctr -n k8s.io images list -q
-```
-
 ## 15.init
 
 **master机器**
 
 ```shell
 kubeadm init \
---apiserver-advertise-address=10.0.0.128 \
+--apiserver-advertise-address=10.0.0.130 \
 --kubernetes-version=v1.28.10 \
 --pod-network-cidr=10.244.0.0/16 \
 --service-cidr=10.254.0.0/16 \
@@ -500,6 +417,7 @@ kubeadm init \
 下面的初始化成功了
 
 ```shell
+[addons] Applied essential addon: CoreDNS
 [addons] Applied essential addon: kube-proxy
 
 Your Kubernetes control-plane has initialized successfully!
@@ -520,14 +438,13 @@ Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
 
 Then you can join any number of worker nodes by running the following on each as root:
 
-kubeadm join 10.0.0.128:6443 --token 9jhj9d.97pb9w09n2mx5p3v \
-	--discovery-token-ca-cert-hash sha256:59cfa3a5f42963cecac6eea6b8d269c9be5dd3e0a4bb89569e96867d121d123b 
-
+kubeadm join 10.0.0.130:6443 --token 3wdes5.q0m3rvt65551m6ee \
+	--discovery-token-ca-cert-hash sha256:0f7339facb4fd22a1bbaf3913d2cbcb436f72a4e7b0ccd2c612d380e1be762dc 
 ```
 
 
 
-
+未完待续
 
 ## 16.calico
 
